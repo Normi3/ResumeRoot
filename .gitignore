@@ -1,0 +1,16 @@
+# Private candidate and execution data
+.env
+*.key
+*.pem
+data/
+artifacts/
+archives/
+tailored_resumes/
+submitted_applications/
+*.sqlite
+*.db
+
+# Local runtime files
+__pycache__/
+.pytest_cache/
+.DS_Store
