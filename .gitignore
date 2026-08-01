@@ -2,6 +2,8 @@
 .env
 *.key
 *.pem
+.venv/
+.resumeroot/
 data/
 artifacts/
 archives/

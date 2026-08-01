@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "resumeroot"
+version = "0.1.0"
+description = "Local-first evidence and application ledger for governed job-search workflows."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{name = "Mars Harris"}]
+license = {text = "AGPL-3.0-only"}
+keywords = ["job-search", "resume", "application-tracking", "provenance"]
+
+[project.scripts]
+resumeroot = "resumeroot.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/resumeroot"]
