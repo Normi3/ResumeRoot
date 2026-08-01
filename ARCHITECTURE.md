@@ -42,3 +42,17 @@ Execution adapters should return structured outcomes rather than prose:
 ```
 
 This makes a third-party executor replaceable and prevents a workflow from claiming success based on an unverified click.
+
+## Browser-agent execution contract
+
+ResumeRoot's vendored executor supports the following modes:
+
+| Mode | Invocation | Browser boundary |
+| --- | --- | --- |
+| Codex CLI | `applypilot apply --agent codex` | `codex exec` receives only an isolated Playwright MCP server connected to a dedicated Chrome worker. |
+| Claude Code | `applypilot apply --agent claude` | Claude Code receives the same isolated Playwright MCP configuration. |
+| Human handoff | `applypilot apply --gen --url <job-url>` | A job-specific prompt is generated for manual completion; it is not reported as submitted. |
+
+An executor must be selected explicitly from `codex` or `claude`; unsupported names fail before browser work begins. Both automated modes require a locally installed Chrome/Chromium, Node.js (`npx`) for the Playwright MCP server, and the matching CLI on `PATH`. The worker profile is dedicated to the job-search system; it is never cloned from a user's ordinary browser profile.
+
+Executor output is parsed into an `application_event`. A successful click alone is insufficient: the system should record `verified` only after an authoritative employer or platform confirmation signal is available. CAPTCHA, login, missing-fact, and unsupported-flow outcomes become exceptions for human resolution.

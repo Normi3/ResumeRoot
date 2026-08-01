@@ -11,6 +11,16 @@ APP_DIR = Path(os.environ.get("APPLYPILOT_DIR", Path.home() / ".applypilot"))
 # Core paths
 DB_PATH = APP_DIR / "applypilot.db"
 PROFILE_PATH = APP_DIR / "profile.json"
+# Resume roles are intentionally separate:
+# - master_resume: private source-of-truth used for matching and fact checking
+# - base_resume: the one-page structure/style used to produce tailored resumes
+MASTER_RESUME_PATH = APP_DIR / "master_resume.txt"
+MASTER_RESUME_PDF_PATH = APP_DIR / "master_resume.pdf"
+BASE_RESUME_PATH = APP_DIR / "base_resume.txt"
+BASE_RESUME_PDF_PATH = APP_DIR / "base_resume.pdf"
+VERIFIED_FACTS_PATH = APP_DIR / "verified_facts.yaml"
+# Legacy single-resume paths (v0.3 and earlier). Load helpers below fall back
+# to these so existing users do not need an immediate migration.
 RESUME_PATH = APP_DIR / "resume.txt"
 RESUME_PDF_PATH = APP_DIR / "resume.pdf"
 SEARCH_CONFIG_PATH = APP_DIR / "searches.yaml"
@@ -99,6 +109,61 @@ def load_profile() -> dict:
             f"Profile not found at {PROFILE_PATH}. Run `applypilot init` first."
         )
     return json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
+
+
+def get_master_resume_path() -> Path:
+    """Return the private source resume text path, with legacy fallback."""
+    if MASTER_RESUME_PATH.exists():
+        return MASTER_RESUME_PATH
+    return RESUME_PATH
+
+
+def get_base_resume_path() -> Path:
+    """Return the one-page base resume text path, with legacy fallback."""
+    if BASE_RESUME_PATH.exists():
+        return BASE_RESUME_PATH
+    return RESUME_PATH
+
+
+def load_master_resume_text() -> str:
+    """Load the private source-of-truth resume used for matching and validation."""
+    path = get_master_resume_path()
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Master resume text not found at {MASTER_RESUME_PATH}. Run `applypilot init`."
+        )
+    resume_text = path.read_text(encoding="utf-8")
+    verified = load_verified_facts()
+    if not verified:
+        return resume_text
+
+    import yaml
+    verified_block = yaml.safe_dump(verified, sort_keys=False, allow_unicode=True).strip()
+    return (
+        "VERIFIED FACTS — THESE OVERRIDE ANY CONFLICTING MASTER-RESUME TEXT:\n"
+        f"{verified_block}\n\n"
+        "PRIVATE MASTER RESUME — ITEMS MARKED VERIFY ARE NOT EXTERNALLY USABLE "
+        "UNLESS CONFIRMED ABOVE:\n"
+        f"{resume_text}"
+    )
+
+
+def load_base_resume_text() -> str:
+    """Load the one-page base resume used as the tailoring structure."""
+    path = get_base_resume_path()
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Base resume text not found at {BASE_RESUME_PATH}. Run `applypilot init`."
+        )
+    return path.read_text(encoding="utf-8")
+
+
+def load_verified_facts() -> dict:
+    """Load user-confirmed facts that supersede draft or conflicting resume text."""
+    if not VERIFIED_FACTS_PATH.exists():
+        return {}
+    import yaml
+    return yaml.safe_load(VERIFIED_FACTS_PATH.read_text(encoding="utf-8")) or {}
 
 
 def load_search_config() -> dict:
@@ -202,7 +267,7 @@ def get_tier() -> int:
 
     Tier 1 (Discovery):            Python + pip
     Tier 2 (AI Scoring & Tailoring): + LLM API key
-    Tier 3 (Full Auto-Apply):       + Claude Code CLI + Chrome
+    Tier 3 (Full Auto-Apply):       + Codex or Claude Code CLI + Chrome
     """
     load_env()
 
@@ -210,14 +275,14 @@ def get_tier() -> int:
     if not has_llm:
         return 1
 
-    has_claude = shutil.which("claude") is not None
+    has_apply_agent = any(shutil.which(name) for name in ("codex", "claude"))
     try:
         get_chrome_path()
         has_chrome = True
     except FileNotFoundError:
         has_chrome = False
 
-    if has_claude and has_chrome:
+    if has_apply_agent and has_chrome:
         return 3
 
     return 2
@@ -241,8 +306,8 @@ def check_tier(required: int, feature: str) -> None:
     if required >= 2 and not any(os.environ.get(k) for k in ("GEMINI_API_KEY", "OPENAI_API_KEY", "LLM_URL")):
         missing.append("LLM API key — run [bold]applypilot init[/bold] or set GEMINI_API_KEY")
     if required >= 3:
-        if not shutil.which("claude"):
-            missing.append("Claude Code CLI — install from [bold]https://claude.ai/code[/bold]")
+        if not any(shutil.which(name) for name in ("codex", "claude")):
+            missing.append("Codex CLI or Claude Code CLI")
         try:
             get_chrome_path()
         except FileNotFoundError:
@@ -256,5 +321,37 @@ def check_tier(required: int, feature: str) -> None:
         _console.print("\n[yellow]Missing:[/yellow]")
         for m in missing:
             _console.print(f"  - {m}")
+    _console.print()
+    raise SystemExit(1)
+
+
+def check_auto_apply_dependencies(agent: str = "codex") -> None:
+    """Gate browser application on its actual runtime dependencies.
+
+    Auto-apply consumes jobs that already have a score and tailored resume. It
+    does not call the scoring/tailoring LLM, so requiring an LLM API key here
+    incorrectly blocks users who prepared those artifacts manually or with a
+    separate agent.
+    """
+    load_env()
+
+    missing: list[str] = []
+    if not shutil.which(agent):
+        missing.append(f"{agent.title()} CLI")
+    try:
+        get_chrome_path()
+    except FileNotFoundError:
+        missing.append("Chrome/Chromium — install or set CHROME_PATH")
+    if not shutil.which("npx"):
+        missing.append("Node.js (npx) — required for Playwright MCP")
+
+    if not missing:
+        return
+
+    from rich.console import Console
+    _console = Console(stderr=True)
+    _console.print("\n[red]'auto-apply' is missing required browser dependencies.[/red]")
+    for item in missing:
+        _console.print(f"  - {item}")
     _console.print()
     raise SystemExit(1)

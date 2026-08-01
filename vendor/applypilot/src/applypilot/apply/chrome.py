@@ -100,9 +100,10 @@ def _kill_on_port(port: int) -> None:
 def setup_worker_profile(worker_id: int) -> Path:
     """Create an isolated Chrome profile for a worker.
 
-    On first run, clones from an existing worker profile (preferred, since
-    it already has session cookies) or from the user's real Chrome profile.
-    Subsequent runs reuse the existing worker profile.
+    On first run, clones only from an existing ApplyPilot worker profile.
+    It never copies the user's normal Chrome profile. The first worker starts
+    clean so the user can explicitly authenticate a dedicated job-search
+    session. Subsequent runs reuse that isolated profile.
 
     Args:
         worker_id: Numeric worker identifier.
@@ -114,7 +115,7 @@ def setup_worker_profile(worker_id: int) -> Path:
     if (profile_dir / "Default").exists():
         return profile_dir  # Already initialized
 
-    # Find a source: prefer existing worker (has session cookies), else user profile
+    # Find a source only among existing dedicated ApplyPilot workers.
     source: Path | None = None
     for wid in range(10):
         if wid == worker_id:
@@ -124,7 +125,9 @@ def setup_worker_profile(worker_id: int) -> Path:
             source = candidate
             break
     if source is None:
-        source = config.get_chrome_user_data()
+        logger.info("[worker-%d] Creating clean dedicated Chrome profile", worker_id)
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        return profile_dir
 
     logger.info("[worker-%d] Copying Chrome profile from %s (first time setup)...",
                 worker_id, source.name)

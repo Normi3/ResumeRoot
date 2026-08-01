@@ -147,8 +147,10 @@ def apply(
     limit: Optional[int] = typer.Option(None, "--limit", "-l", help="Max applications to submit."),
     workers: int = typer.Option(1, "--workers", "-w", help="Number of parallel browser workers."),
     min_score: int = typer.Option(7, "--min-score", help="Minimum fit score for job selection."),
-    model: str = typer.Option("haiku", "--model", "-m", help="Claude model name."),
+    agent: str = typer.Option("codex", "--agent", help="Browser agent CLI: codex or claude."),
+    model: Optional[str] = typer.Option(None, "--model", "-m", help="Optional model override for the selected agent."),
     continuous: bool = typer.Option(False, "--continuous", "-c", help="Run forever, polling for new jobs."),
+    daily_limit: int = typer.Option(25, "--daily-limit", help="Rolling 24-hour live submission cap; 0 is unlimited."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview actions without submitting."),
     headless: bool = typer.Option(False, "--headless", help="Run browsers in headless mode."),
     url: Optional[str] = typer.Option(None, "--url", help="Apply to a specific job URL."),
@@ -161,10 +163,11 @@ def apply(
     """Launch auto-apply to submit job applications."""
     _bootstrap()
 
-    from applypilot.config import check_tier, PROFILE_PATH as _profile_path
+    from applypilot.config import PROFILE_PATH as _profile_path
+    from applypilot.config import check_auto_apply_dependencies
     from applypilot.database import get_connection
 
-    # --- Utility modes (no Chrome/Claude needed) ---
+    # --- Utility modes (no Chrome/agent needed) ---
 
     if mark_applied:
         from applypilot.apply.launcher import mark_job
@@ -186,8 +189,16 @@ def apply(
 
     # --- Full apply mode ---
 
-    # Check 1: Tier 3 required (Claude Code CLI + Chrome)
-    check_tier(3, "auto-apply")
+    if agent not in ("codex", "claude"):
+        console.print("[red]--agent must be 'codex' or 'claude'.[/red]")
+        raise typer.Exit(code=1)
+    if daily_limit < 0:
+        console.print("[red]--daily-limit cannot be negative.[/red]")
+        raise typer.Exit(code=1)
+
+    # Check 1: browser runtime required. An LLM API key is not needed when a
+    # scored job and tailored resume have already been prepared.
+    check_auto_apply_dependencies(agent)
 
     # Check 2: Profile exists
     if not _profile_path.exists():
@@ -211,23 +222,17 @@ def apply(
             raise typer.Exit(code=1)
 
     if gen:
-        from applypilot.apply.launcher import gen_prompt, BASE_CDP_PORT
+        from applypilot.apply.launcher import gen_prompt
         target = url or ""
         if not target:
             console.print("[red]--gen requires --url to specify which job.[/red]")
             raise typer.Exit(code=1)
-        prompt_file = gen_prompt(target, min_score=min_score, model=model)
+        prompt_file = gen_prompt(target, min_score=min_score, model=model or "")
         if not prompt_file:
             console.print("[red]No matching job found for that URL.[/red]")
             raise typer.Exit(code=1)
-        mcp_path = _profile_path.parent / ".mcp-apply-0.json"
         console.print(f"[green]Wrote prompt to:[/green] {prompt_file}")
-        console.print(f"\n[bold]Run manually:[/bold]")
-        console.print(
-            f"  claude --model {model} -p "
-            f"--mcp-config {mcp_path} "
-            f"--permission-mode bypassPermissions < {prompt_file}"
-        )
+        console.print("[dim]Use the normal apply command to launch it with the configured browser agent.[/dim]")
         return
 
     from applypilot.apply.launcher import main as apply_main
@@ -237,7 +242,9 @@ def apply(
     console.print("\n[bold blue]Launching Auto-Apply[/bold blue]")
     console.print(f"  Limit:    {'unlimited' if continuous else effective_limit}")
     console.print(f"  Workers:  {workers}")
-    console.print(f"  Model:    {model}")
+    console.print(f"  Agent:    {agent}")
+    console.print(f"  Model:    {model or 'agent default'}")
+    console.print(f"  Daily cap:{' unlimited' if daily_limit == 0 else f' {daily_limit}/24h'}")
     console.print(f"  Headless: {headless}")
     console.print(f"  Dry run:  {dry_run}")
     if url:
@@ -253,6 +260,8 @@ def apply(
         dry_run=dry_run,
         continuous=continuous,
         workers=workers,
+        agent=agent,
+        daily_limit=daily_limit,
     )
 
 
@@ -337,8 +346,11 @@ def doctor() -> None:
     """Check your setup and diagnose missing requirements."""
     import shutil
     from applypilot.config import (
-        load_env, PROFILE_PATH, RESUME_PATH, RESUME_PDF_PATH,
-        SEARCH_CONFIG_PATH, ENV_PATH, get_chrome_path,
+        BASE_RESUME_PATH, BASE_RESUME_PDF_PATH,
+        MASTER_RESUME_PATH, MASTER_RESUME_PDF_PATH,
+        RESUME_PATH, RESUME_PDF_PATH,
+        load_env, PROFILE_PATH,
+        SEARCH_CONFIG_PATH, get_chrome_path,
     )
 
     load_env()
@@ -356,13 +368,19 @@ def doctor() -> None:
     else:
         results.append(("profile.json", fail_mark, "Run 'applypilot init' to create"))
 
-    # Resume
-    if RESUME_PATH.exists():
-        results.append(("resume.txt", ok_mark, str(RESUME_PATH)))
-    elif RESUME_PDF_PATH.exists():
-        results.append(("resume.txt", warn_mark, "Only PDF found — plain-text needed for AI stages"))
-    else:
-        results.append(("resume.txt", fail_mark, "Run 'applypilot init' to add your resume"))
+    # Resume roles (legacy resume.txt satisfies both during migration)
+    for label, txt_path, pdf_path in (
+        ("master resume", MASTER_RESUME_PATH, MASTER_RESUME_PDF_PATH),
+        ("one-page base", BASE_RESUME_PATH, BASE_RESUME_PDF_PATH),
+    ):
+        if txt_path.exists():
+            results.append((label, ok_mark, str(txt_path)))
+        elif RESUME_PATH.exists():
+            results.append((label, warn_mark, f"Using legacy {RESUME_PATH}"))
+        elif pdf_path.exists() or RESUME_PDF_PATH.exists():
+            results.append((label, warn_mark, "Only PDF found — plain text required for AI stages"))
+        else:
+            results.append((label, fail_mark, "Run 'applypilot init' to configure"))
 
     # Search config
     if SEARCH_CONFIG_PATH.exists():
@@ -396,13 +414,18 @@ def doctor() -> None:
                         "Set GEMINI_API_KEY in ~/.applypilot/.env (run 'applypilot init')"))
 
     # --- Tier 3 checks ---
-    # Claude Code CLI
+    # Browser-agent CLIs
+    codex_bin = shutil.which("codex")
+    if codex_bin:
+        results.append(("Codex CLI", ok_mark, codex_bin))
+    else:
+        results.append(("Codex CLI", fail_mark, "Required for --agent codex"))
+
     claude_bin = shutil.which("claude")
     if claude_bin:
         results.append(("Claude Code CLI", ok_mark, claude_bin))
     else:
-        results.append(("Claude Code CLI", fail_mark,
-                        "Install from https://claude.ai/code (needed for auto-apply)"))
+        results.append(("Claude Code CLI", "[dim]optional[/dim]", "Only needed for --agent claude"))
 
     # Chrome
     try:
@@ -446,9 +469,9 @@ def doctor() -> None:
 
     if tier == 1:
         console.print("[dim]  → Tier 2 unlocks: scoring, tailoring, cover letters (needs LLM API key)[/dim]")
-        console.print("[dim]  → Tier 3 unlocks: auto-apply (needs Claude Code CLI + Chrome + Node.js)[/dim]")
+        console.print("[dim]  → Tier 3 unlocks: auto-apply (needs Codex/Claude + Chrome + Node.js)[/dim]")
     elif tier == 2:
-        console.print("[dim]  → Tier 3 unlocks: auto-apply (needs Claude Code CLI + Chrome + Node.js)[/dim]")
+        console.print("[dim]  → Tier 3 unlocks: auto-apply (needs Codex/Claude + Chrome + Node.js)[/dim]")
 
     console.print()
 

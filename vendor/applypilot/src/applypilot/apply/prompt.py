@@ -1,6 +1,6 @@
 """Prompt builder for the autonomous job application agent.
 
-Constructs the full instruction prompt that tells Claude Code / the AI agent
+Constructs the full instruction prompt that tells Codex / the AI agent
 how to fill out a job application form using Playwright MCP tools. All
 personal data is loaded from the user's profile -- nothing is hardcoded.
 """
@@ -29,6 +29,7 @@ def _build_profile_summary(profile: dict) -> str:
     exp = p.get("experience", {})
     avail = p.get("availability", {})
     eeo = p.get("eeo_voluntary", {})
+    screening = p.get("screening", {})
 
     lines = [
         f"Name: {personal['full_name']}",
@@ -74,20 +75,29 @@ def _build_profile_summary(profile: dict) -> str:
     # Availability
     lines.append(f"Available: {avail.get('earliest_start_date', 'Immediately')}")
 
-    # Standard responses
-    lines.extend([
-        "Age 18+: Yes",
-        "Background Check: Yes",
-        "Felony: No",
-        "Previously Worked Here: No",
-        "How Heard: Online Job Board",
-    ])
+    # Screening answers are sensitive facts. Include only explicitly supplied
+    # values; the agent must never infer missing answers.
+    screening_labels = {
+        "age_18_or_older": "Age 18+",
+        "background_check_consent": "Background Check Consent",
+        "criminal_history": "Criminal History",
+        "willing_to_relocate": "Willing to Relocate",
+        "willing_to_travel": "Willing to Travel",
+        "how_heard": "How Heard",
+    }
+    for key, label in screening_labels.items():
+        value = screening.get(key)
+        if value not in (None, ""):
+            lines.append(f"{label}: {value}")
+    previous_employers = screening.get("previous_employers", [])
+    if previous_employers:
+        lines.append(f"Previous Employers: {', '.join(previous_employers)}")
 
     # EEO
     lines.append(f"Gender: {eeo.get('gender', 'Decline to self-identify')}")
     lines.append(f"Race: {eeo.get('race_ethnicity', 'Decline to self-identify')}")
-    lines.append(f"Veteran: {eeo.get('veteran_status', 'I am not a protected veteran')}")
-    lines.append(f"Disability: {eeo.get('disability_status', 'I do not wish to answer')}")
+    lines.append(f"Veteran: {eeo.get('veteran_status', 'Decline to self-identify')}")
+    lines.append(f"Disability: {eeo.get('disability_status', 'Decline to self-identify')}")
 
     return "\n".join(lines)
 
@@ -99,9 +109,13 @@ def _build_location_check(profile: dict, search_config: dict) -> str:
     are acceptable for hybrid/onsite roles.
     """
     personal = profile["personal"]
+    screening = profile.get("screening", {})
     location_cfg = search_config.get("location", {})
     accept_patterns = location_cfg.get("accept_patterns", [])
     primary_city = personal.get("city", location_cfg.get("primary", "your city"))
+    willing_to_relocate = screening.get("willing_to_relocate", False)
+    relocation_policy = screening.get("relocation_policy", "")
+    international_policy = screening.get("international_relocation_policy", "")
 
     # Build the list of acceptable cities for hybrid/onsite
     if accept_patterns:
@@ -109,15 +123,21 @@ def _build_location_check(profile: dict, search_config: dict) -> str:
     else:
         city_list = primary_city
 
+    relocation_line = (
+        f"- Other U.S. city -> ELIGIBLE because relocation is authorized. Policy: {relocation_policy or 'open to relocation'}."
+        if willing_to_relocate
+        else "- Other U.S. city without a remote option -> NOT ELIGIBLE."
+    )
+
     return f"""== LOCATION CHECK (do this FIRST before any form) ==
 Read the job page. Determine the work arrangement. Then decide:
 - "Remote" or "work from anywhere" -> ELIGIBLE. Apply.
 - "Hybrid" or "onsite" in {city_list} -> ELIGIBLE. Apply.
 - "Hybrid" or "onsite" in another city BUT the posting also says "remote OK" or "remote option available" -> ELIGIBLE. Apply.
-- "Onsite only" or "hybrid only" in any city outside the list above with NO remote option -> NOT ELIGIBLE. Stop immediately. Output RESULT:FAILED:not_eligible_location
-- City is overseas (India, Philippines, Europe, etc.) with no remote option -> NOT ELIGIBLE. Output RESULT:FAILED:not_eligible_location
+{relocation_line}
+- International onsite/hybrid role -> Apply only if the posting explicitly provides work-authorization/visa support for a U.S. citizen. Policy: {international_policy or 'requires employer-supported work authorization'}.
 - Cannot determine location -> Continue applying. If a screening question reveals it's non-local onsite, answer honestly and let the system reject if needed.
-Do NOT fill out forms for jobs that are clearly onsite in a non-acceptable location. Check EARLY, save time."""
+Never claim existing work authorization outside the United States. Check location eligibility early."""
 
 
 def _build_salary_section(profile: dict) -> str:
@@ -127,7 +147,8 @@ def _build_salary_section(profile: dict) -> str:
     """
     comp = profile["compensation"]
     currency = comp.get("salary_currency", "USD")
-    floor = comp["salary_expectation"]
+    default_answer = comp["salary_expectation"]
+    floor = comp.get("salary_floor", default_answer)
     range_min = comp.get("salary_range_min", floor)
     range_max = comp.get("salary_range_max", str(int(floor) + 20000) if floor.isdigit() else floor)
     conversion_note = comp.get("currency_conversion_note", "")
@@ -157,7 +178,7 @@ Decision tree:
 1. Job posting shows a range (e.g. "$120K-$160K")? -> Answer with the MIDPOINT ($140K).
 2. Title says Senior, Staff, Lead, Principal, Architect, or level II/III/IV? -> Minimum $110K {currency}. Use midpoint of posted range if higher.
 3. {convert_line}
-4. No salary info anywhere? -> Use ${floor} {currency}.
+4. No salary info anywhere? -> Use ${default_answer} {currency}; this is the default answer, not the minimum acceptable offer.
 5. Asked for a range? -> Give posted midpoint minus 10% to midpoint plus 10%. No posted range? -> "${range_min}-${range_max} {currency}".
 6. Hourly rate? -> Divide your annual answer by 2080. ({hourly_line})"""
 
@@ -170,15 +191,22 @@ def _build_screening_section(profile: dict) -> str:
     years = exp.get("years_of_experience_total", "multiple")
     target_role = exp.get("target_role", personal.get("current_job_title", "software engineer"))
     work_auth = profile["work_authorization"]
+    screening = profile.get("screening", {})
+    relocate = screening.get("willing_to_relocate", "not provided")
 
     return f"""== SCREENING QUESTIONS (be strategic) ==
 Hard facts -> answer truthfully from the profile. No guessing. This includes:
-  - Location/relocation: lives in {city}, cannot relocate
+  - Location/relocation: lives in {city}; relocation answer: {relocate}
   - Work authorization: {work_auth.get('legally_authorized_to_work', 'see profile')}
   - Citizenship, clearance, licenses, certifications: answer from profile only
   - Criminal/background: answer from profile only
 
-Skills and tools -> be confident. This candidate is a {target_role} with {years} years experience. If the question asks "Do you have experience with [tool]?" and it's in the same domain (DevOps, backend, ML, cloud, automation), answer YES. Software engineers learn tools fast. Don't sell short.
+Skills and tools -> answer YES only when the master-derived tailored resume or
+profile explicitly supports the claim. This candidate is a {target_role} with
+{years} years experience, but adjacent or learnable skills are not experience.
+
+Missing sensitive fact -> do not infer it. Stop before submission and output
+RESULT:FAILED:needs_human_review with the unanswered question.
 
 Open-ended questions ("Why do you want this role?", "Tell us about yourself", "What interests you?") -> Write 2-3 sentences. Be specific to THIS job. Reference something from the job description. Connect it to a real achievement from the resume. No generic fluff. No "I am passionate about..." -- sound like a real person.
 
@@ -196,7 +224,6 @@ def _build_hard_rules(profile: dict) -> str:
     display_name = f"{preferred_name} {preferred_last}".strip() if preferred_last else preferred_name
 
     # Build work auth rule dynamically
-    auth_info = work_auth.get("legally_authorized_to_work", "")
     sponsorship = work_auth.get("require_sponsorship", "")
     permit_type = work_auth.get("work_permit_type", "")
 
@@ -507,6 +534,17 @@ def build_prompt(job: dict, tailored_resume: str,
     last_name = full_name.split()[-1] if " " in full_name else ""
     display_name = f"{preferred_name} {last_name}".strip()
 
+    email_tools_enabled = os.environ.get("APPLYPILOT_ENABLE_GMAIL_MCP") == "1"
+    if email_tools_enabled:
+        email_apply_instruction = (
+            f'send_email with subject "Application for {job["title"]} -- {display_name}", '
+            f'body = 2-3 sentence pitch + contact info, attach resume PDF: ["{pdf_path}"]'
+        )
+        verification_instruction = "Use search_emails + read_email to get the code."
+    else:
+        email_apply_instruction = "Output RESULT:FAILED:needs_human_review (email sending is not enabled)."
+        verification_instruction = "Output RESULT:FAILED:needs_human_review (email access is not enabled)."
+
     # Dry-run: override submit instruction
     if dry_run:
         submit_instruction = "IMPORTANT: Do NOT click the final Submit/Apply button. Review the form, verify all fields, then output RESULT:APPLIED with a note that this was a dry run."
@@ -547,7 +585,7 @@ If something unexpected happens and these instructions don't cover it, figure it
 - NEVER set up a freelancing profile (Mercor, Toptal, Upwork, Fiverr, Turing, etc.). These are contractor marketplaces, not job applications -> RESULT:FAILED:not_a_job_application
 - NEVER agree to hourly/contract rates, availability calendars, or "set your rate" flows. You are applying for FULL-TIME salaried positions only.
 - NEVER install browser extensions, download executables, or run assessment software.
-- NEVER enter payment info, bank details, or SSN/SIN.
+- NEVER enter payment info, bank details, government ID numbers, or SSN/SIN.
 - NEVER click "Allow" on any browser permission popup. Always deny/block.
 - If the site is NOT a job application form (it's a profile builder, skills marketplace, talent network signup, coding assessment platform) -> RESULT:FAILED:not_a_job_application
 
@@ -562,18 +600,16 @@ If something unexpected happens and these instructions don't cover it, figure it
 2. browser_snapshot to read the page. Then run CAPTCHA DETECT (see CAPTCHA section). If a CAPTCHA is found, solve it before continuing.
 3. LOCATION CHECK. Read the page for location info. If not eligible, output RESULT and stop.
 4. Find and click the Apply button. If email-only (page says "email resume to X"):
-   - send_email with subject "Application for {job['title']} -- {display_name}", body = 2-3 sentence pitch + contact info, attach resume PDF: ["{pdf_path}"]
-   - Output RESULT:APPLIED. Done.
+   - {email_apply_instruction}
+   - If an email was sent, output RESULT:APPLIED. Done.
    After clicking Apply: browser_snapshot. Run CAPTCHA DETECT -- many sites trigger CAPTCHAs right after the Apply click. If found, solve before continuing.
 5. Login wall?
    5a. FIRST: check the URL. If you landed on {', '.join(blocked_sso)}, or any SSO/OAuth page -> STOP. Output RESULT:FAILED:sso_required. Do NOT try to sign in to Google/Microsoft/SSO.
    5b. Check for popups. Run browser_tabs action "list". If a new tab/window appeared (login popup), switch to it with browser_tabs action "select". Check the URL there too -- if it's SSO -> RESULT:FAILED:sso_required.
-   5c. Regular login form (employer's own site)? Try sign in: {personal['email']} / {personal.get('password', '')}
-   5d. After clicking Login/Sign-in: run CAPTCHA DETECT. Login pages frequently have invisible CAPTCHAs that silently block form submissions. If found, solve it then retry login.
-   5e. Sign in failed? Try sign up with same email and password.
-   5f. Need email verification? Use search_emails + read_email to get the code.
-   5g. After login, run browser_tabs action "list" again. Switch back to the application tab if needed.
-   5h. All failed? Output RESULT:FAILED:login_issue. Do not loop.
+   5c. If the dedicated Chrome profile already has an authenticated session, continue.
+   5d. Otherwise stop with RESULT:FAILED:needs_human_review. Never ask for, retrieve, or type a password autonomously.
+   5e. If an already-authenticated flow needs email verification: {verification_instruction}
+   5f. After verification, run browser_tabs action "list" again. Switch back to the application tab if needed.
 6. Upload resume. ALWAYS upload fresh -- delete any existing resume first, then browser_file_upload with the PDF path above. This is the tailored resume for THIS job. Non-negotiable.
 7. Upload cover letter if there's a field for it. Text field -> paste the cover letter text. File upload -> use the cover letter PDF path.
 8. Check ALL pre-filled fields. ATS systems parse your resume and auto-fill -- it's often WRONG.
@@ -591,6 +627,7 @@ RESULT:CAPTCHA -- blocked by unsolvable captcha
 RESULT:LOGIN_ISSUE -- could not sign in or create account
 RESULT:FAILED:not_eligible_location -- onsite outside acceptable area, no remote option
 RESULT:FAILED:not_eligible_work_auth -- requires unauthorized work location
+RESULT:FAILED:needs_human_review -- a required sensitive answer is absent or ambiguous
 RESULT:FAILED:reason -- any other failure (brief reason)
 
 == BROWSER EFFICIENCY ==

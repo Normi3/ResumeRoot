@@ -1,31 +1,74 @@
 # ResumeRoot
 
-**A governed AI application operating system for truthful, job-specific applications.**
+**A governed AI application operating system, with a complete local executor.**
 
-ResumeRoot turns a candidate's verified experience into role-specific application artifacts while preserving provenance, submission state, evidence, and exceptions. It is designed for candidates who want more than a resume generator: they need a durable operating layer for an active job search.
+ResumeRoot combines a private application ledger with a vendored, runnable copy of [ApplyPilot](https://github.com/Pickle-Pixel/ApplyPilot). It separates supported candidate facts, tailored artifacts, application events, verification signals, and exceptions so a job search is inspectable rather than a pile of browser tabs and untraceable uploads.
 
-## Why it exists
+## What is in this repository
 
-Most application workflows collapse source facts, tailored claims, generated files, browser actions, and submission evidence into an untraceable sequence. ResumeRoot separates them.
+| Component | Purpose |
+| --- | --- |
+| `src/resumeroot/` | Local-first application ledger and command-line interface. |
+| `vendor/applypilot/` | Full upstream ApplyPilot executor: discovery, enrichment, scoring, tailoring, PDF generation, and browser-driven application workflow. |
+| `scripts/bootstrap.sh` | One-command local environment setup. |
+| `tests/` | Regression tests for the ResumeRoot ledger. |
+| `ARCHITECTURE.md` | Domain model, state machine, and integration contract. |
+| `THIRD_PARTY_NOTICES.md` | Upstream attribution, provenance, and license information. |
 
-It provides a repeatable workflow for:
+No candidate-specific content is committed: resumes, contact details, API keys, browser sessions, application responses, submission records, and source documents remain private and are ignored by Git.
 
-- maintaining a private, evidence-backed master experience inventory;
-- selecting supported claims for each target role;
-- producing ATS-readable, job-specific resumes and optional letters;
-- routing work across models with explicit cost and quality controls;
-- recording every artifact, form answer, submission signal, and exception;
-- requiring human resolution for missing facts, CAPTCHA, or unsupported claims; and
-- preserving an auditable history of what was sent, where, and why.
+## Quick start
 
-## Core principles
+Requirements for the full pipeline: Python 3.11+, Node.js 18+, Chrome/Chromium, a Gemini/OpenAI/local-model configuration for scoring and tailoring, and Codex CLI or Claude Code for browser execution. The executor checks dependencies before use.
 
-1. **Evidence before optimization.** Tailoring strengthens a supported argument; it does not invent employment, credentials, results, or authorization.
-2. **Private source of truth.** Master experience, contact information, and source documents remain local and are never committed.
-3. **Artifact provenance.** Every submitted resume is retained with company, role, timestamp, source version, and submission status.
-4. **Human authority at the edges.** CAPTCHAs, unknown screening answers, address gaps, and binding external actions are surfaced as exceptions rather than silently guessed.
-5. **ATS without visual compromise.** Output uses an accessible, parsable single-column structure while maintaining deliberate one-page layout control.
-6. **Observable execution.** Browser actions are verified with authoritative submission signals before an application is counted.
+```bash
+git clone https://github.com/Normi3/ResumeRoot.git
+cd ResumeRoot
+make bootstrap
+make init
+make doctor
+```
+
+`make init` starts ApplyPilot's local setup wizard. Enter private information only into the local files it creates; never commit them.
+
+Run the workflow in a safe preview mode first:
+
+```bash
+make run ARGS="--dry-run"
+make apply ARGS="--dry-run --daily-limit 25"
+```
+
+For direct executor access:
+
+```bash
+.venv/bin/applypilot doctor
+.venv/bin/applypilot run --dry-run
+.venv/bin/applypilot apply --agent codex --dry-run --daily-limit 25
+.venv/bin/applypilot apply --agent claude --dry-run --daily-limit 25
+```
+
+## Browser-agent support
+
+The application executor supports two non-interactive browser agents:
+
+- **Codex CLI** — `--agent codex` (the default); launches `codex exec` with an isolated Playwright MCP connection to the dedicated Chrome worker.
+- **Claude Code** — `--agent claude`; launches Claude Code with the same isolated browser connection.
+
+Both require Chrome/Chromium and Node.js (`npx`) for the Playwright MCP server. The `doctor` command reports whether each agent is available. Agent-specific models can be selected with `--model`; omit it to use the agent default.
+
+For a human/browser handoff, generate the per-job prompt with `applypilot apply --gen --url <job-url>` and complete the site manually. Unsupported agent names fail before a browser workflow starts.
+
+## ResumeRoot ledger
+
+The ledger is deliberately small and local. It records opportunities, generated artifacts, execution events, and blocking exceptions in `.resumeroot/ledger.sqlite3` (which is ignored by Git).
+
+```bash
+.venv/bin/resumeroot init
+.venv/bin/resumeroot record-opportunity --company "Example Co" --role "Analyst" --url "https://example.com/job"
+.venv/bin/resumeroot status
+```
+
+Use it to preserve the evidence trail around the executor—not to store information in the public repository.
 
 ## Architecture
 
@@ -41,22 +84,10 @@ Application executor ────────→ Submission verification
 Exception queue ←────────────── Application ledger / archive
 ```
 
-## What this repository will contain
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the state model and adapter contract.
 
-- a vendor-neutral application ledger and artifact schema;
-- a claim/evidence registry for resume governance;
-- ATS preflight rules and one-page document-output adapters;
-- model-routing policies for quality, latency, and token economics;
-- browser-execution contracts with explicit verification states;
-- exception workflows for incomplete information and human-only checks; and
-- import adapters for existing open-source tools.
+## Attribution and license
 
-## Relationship to ApplyPilot
+The executor in `vendor/applypilot/` is a clean vendored snapshot of ApplyPilot, created by Pickle-Pixel, and is licensed under the GNU Affero General Public License v3.0. Its source, license, notices, and attribution remain intact. To keep the complete runnable distribution unambiguous, ResumeRoot is also released under AGPL-3.0. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and [LICENSE](LICENSE).
 
-ResumeRoot is being designed as a separate governance and artifact-preservation layer. It may integrate with [ApplyPilot](https://github.com/Pickle-Pixel/ApplyPilot) as an optional executor.
-
-ApplyPilot is an AGPL-3.0 project created by Pickle-Pixel. Any future ResumeRoot code copied from, modified from, or distributed with ApplyPilot will preserve the required AGPL-3.0 licensing, copyright notices, and attribution. This repository will not present ApplyPilot's work as original ResumeRoot code.
-
-## Status
-
-Initial public architecture and interfaces are in development. The public repository will intentionally exclude resumes, application responses, API keys, personal contact details, company-specific submissions, private source documents, browser sessions, and any confidential materials.
+If you modify, distribute, or deploy the vendored ApplyPilot component, follow its AGPL-3.0 obligations, including the corresponding-source and network-use provisions.
